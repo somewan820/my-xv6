@@ -3,7 +3,7 @@
 - sleep ✔
 - pingpong ✔
 - Primes ✔
-- find
+- find ✔
 - xargs
 ## 选做题
 - uptime
