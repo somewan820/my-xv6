@@ -88,10 +88,31 @@ uint64 sys_uptime(void) {
 
 uint64 sys_trace(void) {
   int n;
-  
+
   if (argint(0, &n) < 0) {
     return 1;
   }
   myproc()->trace_code = n;
+  return 0;
+}
+
+struct sysinfo {
+  uint64 freemem;   // amount of free memory (bytes)
+  uint64 nproc;     // number of process
+};
+
+uint64 sys_sysinfo(void) {
+  struct sysinfo info;
+  free_mem(&info.freemem);
+  free_proc_num(&info.nproc);
+
+  uint64 dstaddr;
+  argaddr(0, &dstaddr);
+
+  // 从内核空间拷贝数据到用户空间
+  if (copyout(myproc()->pagetable, dstaddr, (char *)&info, sizeof info) < 0) {
+    return -1;
+  }
+
   return 0;
 }
