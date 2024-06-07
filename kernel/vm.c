@@ -3,6 +3,8 @@
 #include "memlayout.h"
 #include "elf.h"
 #include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
 #include "defs.h"
 #include "fs.h"
 
@@ -132,7 +134,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->k_pgtbl, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -379,6 +381,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  /*
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -396,6 +399,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     srcva = va0 + PGSIZE;
   }
   return 0;
+  */
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -405,7 +410,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
+  /*uint64 n, va0, pa0;
   int got_null = 0;
 
   while(got_null == 0 && max > 0){
@@ -438,5 +443,102 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+  */
+ return copyinstr_new(pagetable, dst, srcva, max);
+}
+
+void _vmprint(pagetable_t pagetable, int level) {
+  for (int i = 0; i < 512; i++) {
+    if (pagetable[i] & PTE_V) {
+      for (int j = 0; j < level; j++) {
+        if (j==0) {
+          printf("..");
+        } else {
+          printf(" ..");
+        }
+      }
+      printf("%d: pte %p pa %p\n", i, pagetable[i], PTE2PA(pagetable[i]));
+      if ((pagetable[i] & (PTE_R|PTE_W|PTE_X)) == 0) {
+        _vmprint((pagetable_t)PTE2PA(pagetable[i]), level + 1);
+      }
+    }
+  }
+
+}
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  _vmprint(pagetable, 1);
+}
+
+/*
+  create a kernel page table for process
+*/
+pagetable_t k_pgtbl_init_in_process() {
+  pagetable_t k_pgtbl = uvmcreate();
+
+
+  // uart registers
+  uvmmap(k_pgtbl,UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  uvmmap(k_pgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  uvmmap(k_pgtbl, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  uvmmap(k_pgtbl, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  uvmmap(k_pgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  uvmmap(k_pgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  uvmmap(k_pgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return k_pgtbl;
+}
+
+void proc_inithart(pagetable_t k_pgtbl) {
+  w_satp(MAKE_SATP(k_pgtbl));
+  sfence_vma();
+}
+
+void uvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if (mappages(pagetable, va, sz, pa, perm) != 0) {
+    panic("uvmmap");
+  }
+}
+
+void proc_free_kpgtbl(pagetable_t kpgtbl) {
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kpgtbl[i];
+    if (pte & PTE_V) {
+      kpgtbl[i] = 0;
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        proc_free_kpgtbl((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void*)kpgtbl);
+}
+
+void u2kpgtbl(pagetable_t pagetable, pagetable_t kernel_pagetable, uint64 oldsz, uint64 newsz) {
+  pte_t *upte, *kpte;
+  oldsz = PGROUNDDOWN(oldsz);
+  for (int i = oldsz; i < newsz; i += PGSIZE) {
+    if ((upte = walk(pagetable, i, 0)) == 0) {
+      panic("u2kpgtbl: user_pte should exist");
+    }
+    if ((kpte = walk(kernel_pagetable, i, 1)) == 0) {
+      panic("u2kpgtbl: kernel_pte walk error!");
+    }
+    *kpte = (*upte) & (~PTE_U);
   }
 }

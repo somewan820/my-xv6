@@ -121,6 +121,15 @@ found:
     return 0;
   }
 
+  p->k_pgtbl = k_pgtbl_init_in_process();
+
+  char *pa = kalloc();
+  if (pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));
+  uvmmap(p->k_pgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +151,14 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  
+  if (p->kstack) {
+    uvmunmap(p->k_pgtbl, p->kstack, 1, 1);
+  }
+  p->kstack = 0;
+  proc_free_kpgtbl(p->k_pgtbl);
+  p->k_pgtbl = 0;
+  
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -221,6 +238,8 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  u2kpgtbl(p->pagetable, p->k_pgtbl, 0, p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -243,9 +262,16 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if (PGROUNDDOWN(sz + n) >= PLIC) {
+      return -1;
+    }
+
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    
+    u2kpgtbl(p->pagetable, p->k_pgtbl, sz - n, sz);
+
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
@@ -274,6 +300,8 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  u2kpgtbl(np->pagetable, np->k_pgtbl, 0, np->sz);
 
   np->parent = p;
 
@@ -473,8 +501,11 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
 
+        proc_inithart(p->k_pgtbl);
+        swtch(&c->context, &p->context);
+        
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
